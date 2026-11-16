@@ -1,0 +1,35 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "video",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-11-16",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "video",
+      // Local dev works with this placeholder. Before deploying, run
+      // `npx wrangler d1 create video` and paste the id it prints here.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "video-media" }],
+  "ratelimits": [
+    { "name": "CREATE_LIMIT", "namespace_id": "2101", "simple": { "limit": 10, "period": 60 } },
+    { "name": "WRITE_LIMIT", "namespace_id": "2102", "simple": { "limit": 60, "period": 60 } },
+    { "name": "AUTH_LIMIT", "namespace_id": "2103", "simple": { "limit": 10, "period": 60 } }
+  ],
+  "vars": {
+    // Comma-separated emails allowed to create an account and sign in. Empty = anyone.
+    "ALLOWED_EMAILS": "",
+    // Total stored video bytes, in MB, before new uploads are refused.
+    "STORAGE_LIMIT_MB": "5000"
+  },
+  "observability": { "enabled": true }
+}
