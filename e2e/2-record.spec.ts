@@ -3,7 +3,7 @@ import { signIn, record, mediaTime } from "./helpers";
 
 test.beforeEach(async ({ page }) => { await signIn(page); });
 
-test("R3 R4 R5 screen + camera: countdown, pause/resume, upload, then the share page plays a seekable file", async ({ page }) => {
+test("R3 R4 R5 screen + camera: countdown, pause/resume, review, upload, then the share page plays a seekable MP4", async ({ page }) => {
   await page.goto("/record");
   await page.getByRole("radio", { name: "Screen + camera" }).click();
   await expect(page.getByTestId("bubble")).toBeVisible();
@@ -23,6 +23,8 @@ test("R3 R4 R5 screen + camera: countdown, pause/resume, upload, then the share 
   await page.getByRole("button", { name: "Resume" }).click();
   await page.waitForTimeout(1500);
   await page.getByRole("button", { name: "Finish" }).click();
+  await expect(page.getByRole("heading", { name: "Review your recording" })).toBeVisible({ timeout: 20_000 });
+  await page.getByRole("button", { name: "Save video" }).click();
   await expect(page.getByText(/Uploading your video|Opening your video/)).toBeVisible();
   await page.waitForURL(/\/v\/[0-9A-Za-z]{12}$/, { timeout: 30_000 });
   const id = page.url().split("/v/")[1];
@@ -34,7 +36,10 @@ test("R3 R4 R5 screen + camera: countdown, pause/resume, upload, then the share 
   expect(meta.video.mode).toBe("screen_camera");
   expect(meta.video.width / meta.video.height).toBeCloseTo(16 / 9, 2);
   expect(meta.video.hasThumbnail).toBe(true);
-  // The WebM header carries the duration, so the browser can seek.
+  // Chromium records MP4 (H.264) when it can, which phones play; WebM is the fallback.
+  expect(meta.video.contentType).toBe("video/mp4");
+  expect((await page.request.get(`/api/videos/${id}/media`, { headers: { range: "bytes=0-11" } })).headers()["content-type"]).toBe("video/mp4");
+  // The file carries its duration, so the browser can seek.
   const dur = await page.getByTestId("video").evaluate((v: HTMLVideoElement) => new Promise<number>(r => v.readyState ? r(v.duration) : v.addEventListener("loadedmetadata", () => r(v.duration))));
   expect(Number.isFinite(dur)).toBe(true);
   await page.getByRole("slider", { name: "Seek" }).fill("2000");

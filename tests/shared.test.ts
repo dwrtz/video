@@ -111,3 +111,80 @@ describe("camera bubble", () => {
     expect(mid).toEqual({ x: 0.5, y: 0.5, size: "lg" });
   });
 });
+
+import { segments, keptLength, toKept, toMedia, nextPlayable, validCut } from "../src/shared/time";
+import { webmHeaderPatches, applyPatches, unknownSize } from "../src/shared/webm";
+import { pickMimeType } from "../src/client/lib/recorder";
+
+describe("removed section", () => {
+  const v = { durationMs: 10_000, trimStartMs: 1000, trimEndMs: 9000, cutStartMs: 3000, cutEndMs: 5000 };
+  it("splits the kept part around the removed section", () => {
+    expect(segments(v)).toEqual([[1000, 3000], [5000, 9000]]);
+    expect(keptLength(v)).toBe(6000);
+    expect(segments({ ...v, cutStartMs: null, cutEndMs: null })).toEqual([[1000, 9000]]);
+  });
+  it("maps between media time and the viewer's timeline", () => {
+    expect(toKept(v, 1000)).toBe(0);
+    expect(toKept(v, 2500)).toBe(1500);
+    expect(toKept(v, 4000)).toBe(2000); // inside the removed part → its edge
+    expect(toKept(v, 6000)).toBe(3000);
+    expect(toMedia(v, 1500)).toBe(2500);
+    expect(toMedia(v, 2500)).toBe(5500);
+    expect(toMedia(v, 99_999)).toBe(9000);
+  });
+  it("jumps over the removed part and stops at the end", () => {
+    expect(nextPlayable(v, 500)).toBe(1000);
+    expect(nextPlayable(v, 2000)).toBe(2000);
+    expect(nextPlayable(v, 3000)).toBe(5000);
+    expect(nextPlayable(v, 9000)).toBeNull();
+  });
+  it("validates", () => {
+    expect(validCut(v)).toBeNull();
+    expect(validCut({ ...v, cutStartMs: 500 })).toMatch(/inside the kept part/);
+    expect(validCut({ ...v, cutEndMs: 3200 })).toMatch(/half a second/);
+    expect(validCut({ ...v, cutStartMs: 1100, cutEndMs: 8500 })).toMatch(/at least one second/);
+    expect(validCut({ ...v, cutEndMs: null })).toMatch(/start and an end/);
+  });
+});
+
+describe("webm repair", () => {
+  const size4 = (n: number) => [0x10 | (n >>> 24), (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
+  const el = (id: number[], body: number[]) => [...id, ...size4(body.length), ...body];
+  const build = (known: boolean) => {
+    const ebml = el([0x1a, 0x45, 0xdf, 0xa3], [0x42, 0x82, 0x84, 119, 101, 98, 109]);
+    const info = el([0x15, 0x49, 0xa9, 0x66], [0x2a, 0xd7, 0xb1, 0x83, 0x0f, 0x42, 0x40]);
+    const inner = [0x1f, 0x43, 0xb6, 0x75, 0x01, 255, 255, 255, 255, 255, 255, 255, 0xe7, 0x81, 1];
+    const cl = el([0x1f, 0x43, 0xb6, 0x75], [0xe7, 0x81, 0, ...inner]);
+    const seg = el([0x18, 0x53, 0x80, 0x67], [...info, ...cl]);
+    const bytes = new Uint8Array([...ebml, ...seg]);
+    if (!known) { bytes.set(unknownSize(4), ebml.length + 4); bytes.set(unknownSize(4), ebml.length + 8 + info.length + 4); }
+    return { bytes, segAt: ebml.length + 4, clAt: ebml.length + 8 + info.length + 4 };
+  };
+  it("marks a Segment and first Cluster that swallow the rest of the file as unknown-size", () => {
+    const { bytes, segAt, clAt } = build(true);
+    const p = webmHeaderPatches(bytes, bytes.length);
+    expect(p.map(x => x.offset)).toEqual([segAt, clAt]);
+    const fixed = applyPatches(bytes, 0, p);
+    expect(fixed).toEqual(build(false).bytes);
+    expect(webmHeaderPatches(fixed, fixed.length)).toEqual([]);
+    expect(bytes[segAt]).toBe(0x10); // input untouched
+  });
+  it("patches chunks at any offset and leaves other files alone", () => {
+    const { bytes, clAt } = build(true);
+    const p = webmHeaderPatches(bytes, bytes.length);
+    expect(Array.from(applyPatches(bytes.subarray(clAt + 2), clAt + 2, p).subarray(0, 2))).toEqual([255, 255]);
+    expect(webmHeaderPatches(bytes, bytes.length + 10)).toEqual([]); // sizes don't reach the end: not the broken shape
+    expect(webmHeaderPatches(new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112]), 8)).toEqual([]); // MP4
+    expect(Array.from(unknownSize(1))).toEqual([0xff]);
+    expect(Array.from(unknownSize(8))).toEqual([1, 255, 255, 255, 255, 255, 255, 255]);
+  });
+});
+
+describe("recording format", () => {
+  it("prefers MP4 (H.264) and falls back to WebM", () => {
+    expect(pickMimeType(() => true)).toBe("video/mp4;codecs=avc1.42E01F,mp4a.40.2");
+    expect(pickMimeType(t => t === "video/mp4;codecs=avc1,opus" || t.startsWith("video/webm"))).toBe("video/mp4;codecs=avc1,opus");
+    expect(pickMimeType(t => t.startsWith("video/webm"))).toBe("video/webm;codecs=vp9,opus");
+    expect(pickMimeType(() => false)).toBe("");
+  });
+});

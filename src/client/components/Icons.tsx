@@ -35,3 +35,4 @@ export const IconCheck = I(<path d="m5 12.5 4.5 4.5L19 7.5" />);
 export const IconChapters = I(<><path d="M4 6h16M4 12h10M4 18h13" /></>);
 export const IconSignOut = I(<><path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4" /><path d="M10 16.5 5.5 12 10 7.5M5.5 12H15" /></>);
 export const IconSpeed = I(<><path d="M4.5 16.5a8 8 0 1 1 15 0" /><path d="m12 13 3.5-4" /></>);
+export const IconPopOut = I(<><rect x="3.5" y="5" width="17" height="14" rx="2" /><rect x="11.5" y="11" width="7" height="6" rx="1" fill="currentColor" stroke="none" /></>);

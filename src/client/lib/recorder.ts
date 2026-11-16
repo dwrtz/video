@@ -1,4 +1,5 @@
 import fixWebmDuration from "fix-webm-duration";
+import { applyPatches, webmHeaderPatches } from "../../shared/webm";
 import type { Mode } from "../../shared/limits";
 
 export type BubbleSize = "sm" | "md" | "lg";
@@ -15,11 +16,18 @@ export function clampBubble(b: Bubble, w: number, h: number): Bubble {
 }
 export const DEFAULT_BUBBLE: Bubble = { x: 0, y: 1, size: "md" }; // bottom-left, clamped when drawn
 
-export function pickMimeType(): string {
-  for (const t of ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4;codecs=avc1,mp4a.40.2", "video/mp4"]) {
-    if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(t)) return t;
-  }
-  return "video/webm";
+/**
+ * MP4 with H.264 first: it plays everywhere, including Safari on iPhone. Chrome 126+ records it
+ * (with AAC on macOS, Windows and Android; with Opus where it has no AAC encoder, e.g. Linux),
+ * and Safari records it natively. WebM is the fallback (Firefox).
+ */
+export const MIME_PREFERENCE = [
+  "video/mp4;codecs=avc1.42E01F,mp4a.40.2", "video/mp4;codecs=avc1,mp4a.40.2", "video/mp4;codecs=avc1,opus",
+  "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4",
+];
+export function pickMimeType(supported: (t: string) => boolean = t => typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(t)): string {
+  for (const t of MIME_PREFERENCE) if (supported(t)) return t;
+  return "";
 }
 export const canRecordScreen = () => !!navigator.mediaDevices && "getDisplayMedia" in navigator.mediaDevices;
 
@@ -48,6 +56,15 @@ function video(stream: MediaStream): Promise<HTMLVideoElement> {
   return v.play().then(() => v);
 }
 
+/** Writes the duration into a WebM recording (so it can be seeked), keeping the Segment and Clusters as the browser wrote them. */
+export async function fixWebm(blob: Blob, durationMs: number): Promise<Blob> {
+  const fixed = await fixWebmDuration(blob, durationMs, { logger: false });
+  const head = new Uint8Array(await fixed.slice(0, 4096).arrayBuffer());
+  const patches = webmHeaderPatches(head, fixed.size);
+  if (!patches.length) return fixed;
+  return new Blob([applyPatches(head, 0, patches) as Uint8Array<ArrayBuffer>, fixed.slice(head.length)], { type: fixed.type });
+}
+
 /** A ticker in a Web Worker keeps the canvas drawing while this tab is in the background (timers there are throttled). */
 function ticker(fps: number, onTick: () => void) {
   const src = `let id=setInterval(()=>postMessage(0),${Math.round(1000 / fps)});onmessage=()=>clearInterval(id)`;
@@ -74,6 +91,10 @@ export class RecordingSession {
   private thumb: Promise<Blob | null> | null = null;
   private thumbTimer = 0;
   state: "idle" | "ready" | "recording" | "paused" | "stopped" = "idle";
+  /** What was shared: "browser" (a tab), "window", "monitor" (a whole screen), or "unknown". */
+  surface = "none";
+  /** True when the browser was asked to switch to the shared tab or window. */
+  focusedAway = false;
   onEnded: (() => void) | null = null;
 
   constructor(public mode: Mode, public mic: boolean, bubble: Bubble, public camera0: MediaStream | null) { this.bubble = bubble; this.camera = camera0; }
@@ -82,8 +103,21 @@ export class RecordingSession {
   async prepare() {
     const wantsScreen = this.mode !== "camera";
     if (wantsScreen) {
-      this.screen = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: true });
-      this.screen.getVideoTracks()[0].addEventListener("ended", () => this.onEnded?.());
+      // Keep this page out of the picker, let people switch what they share mid-recording, and (Chrome)
+      // jump straight to the shared tab or window so this page isn't what gets recorded.
+      const CC = (globalThis as any).CaptureController;
+      const controller = CC ? new CC() : undefined;
+      this.screen = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 30, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: true,
+        selfBrowserSurface: "exclude", preferCurrentTab: false, surfaceSwitching: "include", monitorTypeSurfaces: "include", systemAudio: "include",
+        ...(controller ? { controller } : {}),
+      } as DisplayMediaStreamOptions);
+      const track = this.screen.getVideoTracks()[0];
+      this.surface = (track.getSettings() as { displaySurface?: string }).displaySurface ?? "unknown";
+      if (controller && (this.surface === "browser" || this.surface === "window")) {
+        try { (controller as any).setFocusBehavior("focus-captured-surface"); this.focusedAway = true; } catch { /* not supported or too late */ }
+      }
+      track.addEventListener("ended", () => this.onEnded?.());
     }
     const needCamera = this.mode !== "screen";
     const wantVideo = needCamera && !this.camera?.getVideoTracks().length;
@@ -113,8 +147,11 @@ export class RecordingSession {
       videoTrack = canvas.captureStream(30).getVideoTracks()[0];
     } else {
       videoTrack = (this.mode === "screen" ? this.screen! : this.camera!).getVideoTracks()[0];
+      // The element reports the frame as shown (phones rotate the camera), the track settings may not.
+      const el = await video(new MediaStream([videoTrack])).catch(() => null);
       const s = videoTrack.getSettings();
-      this.width = s.width ?? 1280; this.height = s.height ?? 720;
+      this.width = el?.videoWidth || s.width || 1280; this.height = el?.videoHeight || s.height || 720;
+      if (el) el.srcObject = null;
     }
     this.output = new MediaStream([videoTrack, ...this.mixAudio()]);
     this.state = "ready";
@@ -131,7 +168,7 @@ export class RecordingSession {
 
   start() {
     const mimeType = pickMimeType();
-    this.recorder = new MediaRecorder(this.output!, { mimeType, videoBitsPerSecond: 2_500_000, audioBitsPerSecond: 128_000 });
+    this.recorder = new MediaRecorder(this.output!, { ...(mimeType ? { mimeType } : {}), videoBitsPerSecond: 2_500_000, audioBitsPerSecond: 128_000 });
     this.chunks = [];
     this.recorder.ondataavailable = e => { if (e.data.size) this.chunks.push(e.data); };
     this.recorder.start(1000);
@@ -165,9 +202,9 @@ export class RecordingSession {
     if (r.state !== "inactive") r.stop();
     await done;
     this.state = "stopped";
-    const mimeType = r.mimeType || pickMimeType();
+    const mimeType = r.mimeType || pickMimeType() || "video/webm";
     let blob = new Blob(this.chunks, { type: mimeType.split(";")[0] });
-    if (mimeType.includes("webm")) blob = await fixWebmDuration(blob, durationMs, { logger: false });
+    if (mimeType.includes("webm")) blob = await fixWebm(blob, durationMs);
     this.release();
     return { blob, durationMs, width: this.width, height: this.height, mimeType: mimeType.split(";")[0], mode: this.mode, thumbnail };
   }

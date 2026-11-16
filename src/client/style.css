@@ -348,3 +348,46 @@ h1, h2 { letter-spacing: -0.02em; }
   .grid { grid-template-columns: 1fr; }
 }
 .check svg { flex: none; }
+
+/* ---------- 0.1.1: review step, trim editor, format notice, floating controls ---------- */
+.review { width: 100%; max-width: 1180px; display: flex; flex-direction: column; gap: 18px; }
+.review-head h1 { font-size: 24px; letter-spacing: -0.02em; margin: 0 0 4px; }
+.review-head p { margin: 0; }
+.review-body { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 24px; align-items: start; }
+.review-side { display: flex; flex-direction: column; gap: 16px; padding: 20px; border-radius: 16px; background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow-sm); }
+.review-actions { display: flex; flex-direction: column; gap: 8px; }
+.review-actions .btn-lg { width: 100%; justify-content: center; }
+.upload-card.inline { min-width: 0; box-shadow: none; padding: 12px 0 0; border: 0; background: none; }
+.trim-editor { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.trim-stage { position: relative; border-radius: 14px; overflow: hidden; background: #000; box-shadow: var(--shadow); }
+.review .trim-preview { border-radius: 0; display: block; max-height: 62vh; }
+.trim-play { position: absolute; left: 12px; bottom: 12px; width: 44px; height: 44px; border-radius: 50%; border: 0; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; cursor: pointer; box-shadow: 0 6px 18px rgb(0 0 0 / .35); }
+.trim-play:focus-visible { outline: 3px solid var(--accent-soft); outline-offset: 2px; }
+.trim { height: 34px; }
+.trim::before, .trim-fill { top: 14px; }
+.trim-cut { position: absolute; top: 10px; height: 14px; border-radius: 4px; background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--rec) 85%, transparent) 0 5px, color-mix(in srgb, var(--rec) 55%, transparent) 5px 10px); }
+.trim-head { position: absolute; top: 4px; width: 2px; height: 26px; margin-left: -1px; background: var(--ink); border-radius: 1px; pointer-events: none; opacity: .7; }
+.trim input.cut-thumb::-webkit-slider-thumb { border-color: var(--rec); width: 14px; }
+.trim input.cut-thumb::-moz-range-thumb { border-color: var(--rec); }
+.trim-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 32px; }
+.cut-label { font-size: 13px; color: var(--rec); font-weight: 600; font-variant-numeric: tabular-nums; }
+.format-notice { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 24px; text-align: center; color: #fff; background: linear-gradient(180deg, rgb(10 12 16 / .78), rgb(10 12 16 / .92)); z-index: 4; }
+.format-notice strong { font-size: 17px; }
+.format-notice p { margin: 0; max-width: 440px; color: rgb(255 255 255 / .8); font-size: 14px; }
+.no-sound { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: rgb(255 255 255 / .85); padding: 0 6px; }
+.pip-body { margin: 0; background: var(--panel); color: var(--ink); font-family: "Inter Variable", system-ui, sans-serif; display: grid; place-items: center; height: 100vh; }
+.pip-controls { display: flex; align-items: center; gap: 8px; padding: 10px 12px; }
+.pip-controls .rec-dot { background: var(--rec); box-shadow: 0 0 0 4px color-mix(in srgb, var(--rec) 25%, transparent); animation: pulse 1.4s infinite; }
+.pip-controls .rec-dot.paused { animation: none; background: var(--ink-3); box-shadow: none; }
+.pip-time { font-weight: 700; font-variant-numeric: tabular-nums; font-size: 18px; min-width: 52px; }
+.pip-count { font-size: 34px; font-weight: 800; color: var(--accent); min-width: 28px; text-align: center; }
+.pip-label { font-size: 13px; color: var(--ink-2); }
+.pip-btn { height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line-2); background: var(--panel-2); color: var(--ink); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.pip-btn.stop { background: var(--rec); border-color: var(--rec); color: #fff; }
+@media (max-width: 900px) { .review-body { grid-template-columns: 1fr; } }
+@media (max-width: 640px) {
+  .review-head h1 { font-size: 20px; }
+  .review-side { padding: 16px; }
+  .trim input::-webkit-slider-thumb { width: 22px; height: 30px; }
+  .trim { height: 38px; }
+}

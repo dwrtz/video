@@ -17,9 +17,11 @@ export default defineConfig({
   expect: { timeout: 15_000 },
   use: { baseURL: process.env.BASE_URL ?? `http://127.0.0.1:${PORT}`, viewport: { width: 1360, height: 900 }, launchOptions: { args: mediaArgs }, permissions: ["camera", "microphone"] },
   projects: [
-    { name: "desktop", testIgnore: /mobile/ },
+    { name: "desktop", testIgnore: /mobile|webkit/ },
     { name: "iphone-13", testMatch: /mobile/, use: { ...devices["iPhone 13"], browserName: "chromium", launchOptions: { args: mediaArgs } } },
     { name: "pixel-7", testMatch: /mobile/, use: { ...devices["Pixel 7"], launchOptions: { args: mediaArgs } } },
+    // Real WebKit with the iPhone 13 profile, for playback (Safari's engine; not a real iPhone's media stack).
+    { name: "webkit-iphone", testMatch: /webkit/, use: { ...devices["iPhone 13"], launchOptions: {}, permissions: [] } },
   ],
   webServer: process.env.BASE_URL ? undefined : { command: serve, url: `http://127.0.0.1:${PORT}/api/health`, reuseExistingServer: false, timeout: 180_000 },
 });

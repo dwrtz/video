@@ -25,7 +25,7 @@ export async function signIn(page: Page, email = "owner@example.com", name = "Da
 }
 
 /** Records `ms` of video in a mode through the real recorder, and returns the new video's id. */
-export async function record(page: Page, opts: { mode?: "Screen + camera" | "Screen only" | "Camera only"; ms?: number; countdown?: boolean } = {}) {
+export async function record(page: Page, opts: { mode?: "Screen + camera" | "Screen only" | "Camera only"; ms?: number; countdown?: boolean; review?: (page: Page) => Promise<void> } = {}) {
   await page.goto("/record");
   await page.getByRole("radio", { name: opts.mode ?? "Screen + camera" }).click();
   const cd = page.getByRole("checkbox", { name: "Countdown" });
@@ -35,6 +35,9 @@ export async function record(page: Page, opts: { mode?: "Screen + camera" | "Scr
   await expect(page.getByTestId("rec-time")).toBeVisible({ timeout: 15_000 });
   await page.waitForTimeout(opts.ms ?? 3000);
   await page.getByRole("button", { name: "Finish" }).click();
+  await expect(page.getByRole("heading", { name: "Review your recording" })).toBeVisible({ timeout: 20_000 });
+  if (opts.review) await opts.review(page);
+  await page.getByRole("button", { name: "Save video" }).click();
   await page.waitForURL(/\/v\/[0-9A-Za-z]{12}$/, { timeout: 30_000 });
   await expect(page.getByTestId("video-title")).toBeVisible();
   return page.url().split("/v/")[1];
@@ -51,3 +54,17 @@ export async function play(page: Page) {
 export const mediaTime = (page: Page) => page.getByTestId("video").evaluate((v: HTMLVideoElement) => v.currentTime);
 export const origin = (page: Page) => ({ origin: new URL(page.url()).origin });
 export const uniq = () => `${Date.now().toString(36)}${n++}`;
+export const videoCount = async (page: Page) => (await (await page.request.get("/api/videos")).json()).videos.length as number;
+/** Stops at the review step after recording, without saving. */
+export async function recordToReview(page: Page, opts: { mode?: "Screen + camera" | "Screen only" | "Camera only"; ms?: number } = {}) {
+  await page.goto("/record");
+  await page.getByRole("radio", { name: opts.mode ?? "Screen only" }).click();
+  const cd = page.getByRole("checkbox", { name: "Countdown" });
+  if (await cd.isChecked()) await cd.click({ force: true });
+  await expect(page.getByRole("button", { name: "Start recording" })).toBeEnabled();
+  await page.getByRole("button", { name: "Start recording" }).click();
+  await expect(page.getByTestId("rec-time")).toBeVisible({ timeout: 15_000 });
+  await page.waitForTimeout(opts.ms ?? 3000);
+  await page.getByRole("button", { name: "Finish" }).click();
+  await expect(page.getByRole("heading", { name: "Review your recording" })).toBeVisible({ timeout: 20_000 });
+}

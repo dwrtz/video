@@ -19,7 +19,7 @@ function putPart(url: string, blob: Blob, onProgress: (loaded: number) => void):
 }
 
 /** Creates the video, uploads it in multipart parts (3 at a time, each retried twice), then completes it. */
-export async function uploadRecording(rec: { blob: Blob; durationMs: number; width: number; height: number; mimeType: string; mode: Mode; thumbnail: Blob | null; title: string },
+export async function uploadRecording(rec: { blob: Blob; durationMs: number; width: number; height: number; mimeType: string; mode: Mode; thumbnail: Blob | null; title: string; edits?: Record<string, unknown> },
   onProgress: (fraction: number) => void, signal?: { cancelled: boolean }): Promise<string> {
   if (rec.blob.size > LIMITS.maxVideoBytes) throw new Error("This recording is larger than 500 MB");
   const { id } = await api<{ id: string }>("/api/videos", { method: "POST", body: { title: rec.title, contentType: rec.mimeType, mode: rec.mode, width: rec.width, height: rec.height } });
@@ -45,7 +45,7 @@ export async function uploadRecording(rec: { blob: Blob; durationMs: number; wid
     await Promise.all([worker(), worker(), worker()]);
     parts.sort((a, b) => a.partNumber - b.partNumber);
     if (rec.thumbnail) await fetch(`/api/videos/${id}/thumbnail`, { method: "PUT", headers: { "content-type": "image/jpeg" }, body: rec.thumbnail });
-    await api(`/api/videos/${id}/complete`, { method: "POST", body: { parts, durationMs: Math.round(rec.durationMs) } });
+    await api(`/api/videos/${id}/complete`, { method: "POST", body: { parts, durationMs: Math.round(rec.durationMs), ...(rec.edits ? { edits: rec.edits } : {}) } });
     onProgress(1);
     return id;
   } catch (e) {

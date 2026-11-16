@@ -10,7 +10,8 @@ test("R15 phones: sign-in, library and share page fit the screen; the player and
   await noOverflow(page);
   await signIn(page, "owner@example.com");
   await noOverflow(page);
-  const id = await record(page, { mode: "Camera only", ms: 2000 });
+  const id = await record(page, { mode: "Camera only", ms: 2000, review: async p => { await expect(p.getByRole("button", { name: "Save video" })).toBeVisible(); await noOverflow(p); } });
+  expect((await (await page.request.get(`/api/videos/${id}`)).json()).video.contentType).toBe("video/mp4");
   await noOverflow(page);
   const player = await page.getByTestId("player").boundingBox();
   const vw = page.viewportSize()!.width;
@@ -34,6 +35,7 @@ test("R15 phones without screen capture offer camera recording only", async ({ p
   await page.goto("/record");
   await expect(page.getByRole("radio", { name: "Camera only" })).toHaveAttribute("aria-checked", "true");
   await expect(page.getByRole("radio", { name: "Screen + camera" })).toBeDisabled();
-  await expect(page.getByText("Screen recording needs a desktop browser.")).toBeVisible();
+  await expect(page.getByTestId("no-screen-note")).toHaveText("Phones and tablets can't share their screen from a browser, so this device records with its camera.");
+  await expect(page.getByRole("button", { name: "Start recording" })).toBeEnabled();
   await noOverflow(page);
 });

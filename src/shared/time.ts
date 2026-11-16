@@ -58,3 +58,50 @@ export function validTrim(durationMs: number, start: number, end: number | null)
 
 /** How long the (trimmed) video takes at a speed, for the speed menu. */
 export const atSpeed = (lengthMs: number, speed: number) => Math.round(lengthMs / speed);
+
+/** What viewers see: the trim window, minus an optional removed middle section ("cut"). */
+export type Edits = { durationMs: number; trimStartMs: number; trimEndMs: number | null; cutStartMs?: number | null; cutEndMs?: number | null };
+export function segments(v: Edits): [number, number][] {
+  const { start, end } = trimWindow(v);
+  const cs = v.cutStartMs, ce = v.cutEndMs;
+  if (cs == null || ce == null || cs <= start || ce >= end || ce <= cs) return [[start, end]];
+  return [[start, cs], [ce, end]];
+}
+export const keptLength = (v: Edits) => segments(v).reduce((n, [s, e]) => n + (e - s), 0);
+/** Media time → time on the viewer's timeline (0 … keptLength). Times inside a removed part map to its edge. */
+export function toKept(v: Edits, media: number): number {
+  let acc = 0;
+  for (const [s, e] of segments(v)) {
+    if (media < s) return acc;
+    if (media <= e) return acc + (media - s);
+    acc += e - s;
+  }
+  return acc;
+}
+/** Viewer timeline time → media time. */
+export function toMedia(v: Edits, kept: number): number {
+  const segs = segments(v); let acc = 0;
+  for (const [s, e] of segs) {
+    if (kept <= acc + (e - s)) return s + Math.max(0, kept - acc);
+    acc += e - s;
+  }
+  return segs[segs.length - 1][1];
+}
+/** Where playback should be: inside a kept part (unchanged), jumped past a removed part, or null at/after the end. */
+export function nextPlayable(v: Edits, media: number): number | null {
+  for (const [s, e] of segments(v)) {
+    if (media < s) return s;
+    if (media < e) return media;
+  }
+  return null;
+}
+export function validCut(v: Edits): string | null {
+  const cs = v.cutStartMs ?? null, ce = v.cutEndMs ?? null;
+  if (cs === null && ce === null) return null;
+  if (cs === null || ce === null || !Number.isInteger(cs) || !Number.isInteger(ce)) return "Give the removed section a start and an end";
+  const { start, end } = trimWindow(v);
+  if (cs <= start || ce >= end) return "The removed section must sit inside the kept part";
+  if (ce - cs < 500) return "Remove at least half a second";
+  if (keptLength(v) < 1000) return "Keep at least one second";
+  return null;
+}

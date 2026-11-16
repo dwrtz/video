@@ -3,6 +3,7 @@ import type { Mode } from "./limits";
 export type Me = { id: string; email: string; name: string };
 export type VideoSummary = {
   id: string; title: string; status: "uploading" | "ready"; mode: Mode; durationMs: number; trimStartMs: number; trimEndMs: number | null;
+  cutStartMs: number | null; cutEndMs: number | null; muted: boolean;
   createdAt: number; viewCount: number; commentCount: number; hasThumbnail: boolean; size: number;
 };
 export type Reaction = { id: string; emoji: string; timeMs: number };

@@ -47,7 +47,7 @@ test("R13 comments and downloads can be turned off; delete removes the video for
   const v = await viewer(browser);
   await v.page.goto(`/v/${id}`);
   const dl = await v.page.request.get(`/api/videos/${id}/media?download`);
-  expect(dl.headers()["content-disposition"]).toMatch(/^attachment; filename=".+\.webm"$/);
+  expect(dl.headers()["content-disposition"]).toMatch(/^attachment; filename=".+\.mp4"$/);
   await page.getByRole("button", { name: "Edit video" }).click();
   await page.getByRole("checkbox", { name: "Allow comments" }).uncheck({ force: true });
   await page.getByRole("checkbox", { name: "Allow downloads" }).uncheck({ force: true });
