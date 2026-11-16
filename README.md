@@ -16,13 +16,23 @@ Record your screen and camera in the browser, share a link, and get comments and
   - 3-second countdown
   - pause, restart, cancel
   - up to 10 minutes
-- **Upload:** in 5 MB parts straight to R2 (multipart, 3 at a time, retried) with a progress bar. WebM files get a proper duration so they're seekable.
+  - the recorder tab is left out of the screen picker, a shared tab or window is brought to the front, and in Chrome a small always-on-top window (Document Picture-in-Picture) holds Pause and Stop; Alt+Shift+S stops, Alt+Shift+P pauses
+- **Review before saving:** after Stop, the recording stays in your browser until you press Save:
+  - play back only the part you keep
+  - trim the start and end with two handles (so a whole-screen recording doesn't begin and end on the recorder page)
+  - remove one section from the middle
+  - set the title and mute the audio
+  - or discard it and record again
+- **Formats that play on phones:** recordings are MP4 (H.264) wherever the browser can record it (Chrome, Edge, Safari), otherwise WebM. WebM files get a proper duration and valid sizes so they're seekable, WebM saved by 0.1.0 is repaired as it's served, and a browser that can't play a file shows a notice with a download.
+- **Upload:** in 5 MB parts straight to R2 (multipart, 3 at a time, retried) with a progress bar.
 - **Share page:**
   - player with speeds 0.75×–2.5× (showing the time at each speed), keyboard shortcuts, `?t=` links and chapters on the seek bar
   - timestamped comments, emoji reactions that float over the video and leave markers
   - view counts (once per viewer, never the owner)
-- **Owner tools:** rename, trim (non-destructive), chapters, turn comments or downloads off, download, delete.
-- **Everything else:** library with search, light/dark theme, and a phone layout (phones without screen capture record with the camera).
+- **Owner tools:** rename, trim and remove a section, mute, chapters, turn comments or downloads off, download, delete. Trim, the removed section and mute are applied by the player; the stored file and downloads are the full original (downloads of a muted video are for the owner only).
+- **Everything else:** library with search, light/dark theme, and a phone layout (phones can't share their screen from a browser, so they record with the front camera).
+
+![Review step: trim handles, a removed section, title and mute before saving](docs/review-editor.png)
 
 ![Recorder with the camera bubble](docs/recorder.png)
 
@@ -79,11 +89,13 @@ Local dev needs no Cloudflare account. Recording needs a secure context, so use 
 ```sh
 npm run typecheck
 npm test                          # Vitest unit tests
-npx playwright install chromium
-npm run e2e                       # Playwright: desktop + iPhone 13 + Pixel 7, against wrangler dev
+npx playwright install chromium webkit   # webkit also needs: npx playwright install-deps webkit
+npm run e2e                       # Playwright: desktop + iPhone 13 + Pixel 7 (Chromium) + WebKit iPhone 13, against wrangler dev
 ```
 
 The end-to-end tests use Chromium's fake camera, microphone and screen (`--use-fake-device-for-media-stream`, `--use-fake-ui-for-media-stream`, `--auto-select-desktop-capture-source=Entire screen`), so they make real recordings without hardware.
+
+Not covered by automated tests: Safari's real iOS media stack (Linux WebKit plays media through GStreamer, which is more forgiving), recording in Safari, the browser really moving focus to a shared tab, the floating controls staying above other apps, and the browser's own "Stop sharing" bar (simulated by ending the track).
 
 ## Deploy
 
@@ -91,7 +103,7 @@ The end-to-end tests use Chromium's fake camera, microphone and screen (`--use-f
 2. `npx wrangler d1 create video`, then put the printed id in `wrangler.jsonc` → `d1_databases[0].database_id`.
 3. `npx wrangler r2 bucket create video-media`
 4. Set `vars.ALLOWED_EMAILS` to the email(s) that may have accounts.
-5. `npm run deploy` builds the client, applies D1 migrations remotely, and deploys the Worker with its assets.
+5. `npm run deploy` builds the client, applies D1 migrations remotely (including `0002_edits.sql`, which only adds columns), and deploys the Worker with its assets.
 6. Optional: add a custom domain (Workers → `video` → Settings → Domains & Routes), and turn off the `workers.dev` and preview URLs.
 7. Open the site and create your account with the allowlisted email.
 
