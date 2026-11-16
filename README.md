@@ -1,5 +1,7 @@
 # Async Video
 
+> **Built from the Spekkr spec [dwrtz/async-video](https://spekkr.com/dwrtz/async-video/).** The spec has the requirements, design and tests. Tell your AI agent "Build the spec at https://spekkr.com/dwrtz/async-video/start.md" to make your own.
+
 Record your screen and camera in the browser, share a link, and get comments and emoji reactions pinned to the exact moment. It runs as one Cloudflare Worker with R2 for the videos and D1 for everything else.
 
 **Live demo:** https://video.beef-able.com (accounts are limited to the owner's email; share links are open to anyone who has them)
