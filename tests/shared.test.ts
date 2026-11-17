@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatTime, parseTime, parseChapters, chapterAt, trimWindow, validTrim, atSpeed, chaptersToText } from "../src/shared/time";
+import { formatTime, parseTime, parseChapters, chapterAt, trimWindow, validTrim, atSpeed, chaptersToText, removedSpans, keepsAll, remapTime, remapChapters, validSpans } from "../src/shared/time";
 import { parseAllowlist, emailAllowed } from "../src/shared/allowlist";
 import { parseRange } from "../src/shared/range";
 import { planParts } from "../src/shared/parts";
@@ -186,5 +186,54 @@ describe("recording format", () => {
     expect(pickMimeType(t => t === "video/mp4;codecs=avc1,opus" || t.startsWith("video/webm"))).toBe("video/mp4;codecs=avc1,opus");
     expect(pickMimeType(t => t.startsWith("video/webm"))).toBe("video/webm;codecs=vp9,opus");
     expect(pickMimeType(() => false)).toBe("");
+  });
+});
+
+describe("real cuts: removed parts and time remapping", () => {
+  const full = { durationMs: 10_000, trimStartMs: 0, trimEndMs: null };
+  it("lists the removed parts of a selection", () => {
+    expect(removedSpans(full)).toEqual([]);
+    expect(keepsAll(full)).toBe(true);
+    expect(keepsAll({ ...full, trimEndMs: 10_000 })).toBe(true);
+    const sel = { durationMs: 10_000, trimStartMs: 1000, trimEndMs: 8000, cutStartMs: 3000, cutEndMs: 5000 };
+    expect(removedSpans(sel)).toEqual([{ start: 0, end: 1000 }, { start: 3000, end: 5000 }, { start: 8000, end: 10_000 }]);
+    expect(keepsAll(sel)).toBe(false);
+    expect(removedSpans({ ...full, cutStartMs: 2000, cutEndMs: 4000 })).toEqual([{ start: 2000, end: 4000 }]);
+  });
+  it("shifts times back by what was removed before them and drops times inside removed parts", () => {
+    const removed = [{ start: 0, end: 1000 }, { start: 3000, end: 5000 }, { start: 8000, end: 10_000 }];
+    expect(remapTime(0, removed)).toBeNull();
+    expect(remapTime(999, removed)).toBeNull();
+    expect(remapTime(1000, removed)).toBe(0);
+    expect(remapTime(2999, removed)).toBe(1999);
+    expect(remapTime(3000, removed)).toBeNull();
+    expect(remapTime(4999, removed)).toBeNull();
+    expect(remapTime(5000, removed)).toBe(2000);
+    expect(remapTime(7999, removed)).toBe(4999);
+    expect(remapTime(8000, removed)).toBeNull();
+    expect(remapTime(4000, [])).toBe(4000);
+    // order of the list does not matter
+    expect(remapTime(6000, [{ start: 3000, end: 5000 }, { start: 0, end: 1000 }])).toBe(3000);
+  });
+  it("moves chapters with the video and drops ones in removed parts, past the end or doubled", () => {
+    const removed = [{ start: 0, end: 1000 }, { start: 3000, end: 5000 }];
+    const chapters = [
+      { timeMs: 0, title: "Hello" }, { timeMs: 1000, title: "Intro" }, { timeMs: 4000, title: "Gone" },
+      { timeMs: 6000, title: "Details" }, { timeMs: 9500, title: "Late" },
+    ];
+    expect(remapChapters(chapters, removed, 7000)).toEqual([{ timeMs: 0, title: "Intro" }, { timeMs: 3000, title: "Details" }, { timeMs: 6500, title: "Late" }]);
+    expect(remapChapters(chapters, removed, 6000)).toEqual([{ timeMs: 0, title: "Intro" }, { timeMs: 3000, title: "Details" }]);
+    expect(remapChapters([{ timeMs: 1000, title: "A" }, { timeMs: 3000, title: "B" }], [{ start: 1000, end: 3000 }], 5000)).toEqual([{ timeMs: 1000, title: "B" }]);
+  });
+  it("accepts only sorted, non-overlapping removed parts inside the video", () => {
+    expect(validSpans([], 10_000)).toEqual([]);
+    expect(validSpans([{ start: 0, end: 1000 }, { start: 3000, end: 5000 }, { start: 8000, end: 10_020 }], 10_000)).toEqual([{ start: 0, end: 1000 }, { start: 3000, end: 5000 }, { start: 8000, end: 10_000 }]);
+    expect(validSpans([{ start: 3000, end: 5000 }, { start: 0, end: 1000 }], 10_000)).toBeNull();
+    expect(validSpans([{ start: 0, end: 4000 }, { start: 3000, end: 5000 }], 10_000)).toBeNull();
+    expect(validSpans([{ start: 2000, end: 2000 }], 10_000)).toBeNull();
+    expect(validSpans([{ start: 0.5, end: 2000 }], 10_000)).toBeNull();
+    expect(validSpans([{ start: 0, end: 20_000 }], 10_000)).toBeNull();
+    expect(validSpans([{ start: 0, end: 1 }, { start: 2, end: 3 }, { start: 4, end: 5 }, { start: 6, end: 7 }], 10_000)).toBeNull();
+    expect(validSpans("nope", 10_000)).toBeNull();
   });
 });

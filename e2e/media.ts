@@ -67,3 +67,17 @@ export async function timecodeScreen(page: Page) {
 
 /** The stored file of a video, as its owner downloads it. */
 export const fileOf = async (page: Page, id: string) => Buffer.from(await (await page.request.get(`/api/videos/${id}/media?download`)).body());
+
+/** Reads the local test database (.e2e) directly, for facts the API does not show. */
+export function localSql<T = Record<string, unknown>>(sql: string): T[] {
+  const out = execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".e2e", "--json", "--command", sql], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  return JSON.parse(out)[0].results as T[];
+}
+/** Whether an object exists in the local test bucket (.e2e). */
+export function localObjectExists(key: string): boolean {
+  const dir = mkdtempSync(join(tmpdir(), "r2-"));
+  try {
+    execFileSync("npx", ["wrangler", "r2", "object", "get", `video-media/${key}`, "--local", "--persist-to", ".e2e", "--file", join(dir, "o")], { stdio: "ignore" });
+    return true;
+  } catch { return false; } finally { rmSync(dir, { recursive: true, force: true }); }
+}

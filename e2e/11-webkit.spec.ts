@@ -5,7 +5,7 @@ import { PASSWORD } from "./helpers";
 // WebKit here can't record (no MediaRecorder formats on Linux), so a Chromium browser records the video.
 const mediaArgs = ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream", "--auto-select-desktop-capture-source=Entire screen", "--autoplay-policy=no-user-gesture-required"];
 
-test("R15 WebKit (iPhone 13): a recorded MP4 plays, seeks and stops on a share page", async ({ page, baseURL }) => {
+test("R3a R15 WebKit (iPhone 13): a video cut before upload plays, seeks and has the cut length on a share page", async ({ page, baseURL }) => {
   const chrome = await chromium.launch({ args: mediaArgs });
   const ctx = await chrome.newContext({ baseURL, permissions: ["camera", "microphone"] });
   const p = await ctx.newPage();
@@ -23,9 +23,14 @@ test("R15 WebKit (iPhone 13): a recorded MP4 plays, seeks and stops on a share p
   await expect(p.getByTestId("rec-time")).toBeVisible({ timeout: 15_000 });
   await p.waitForTimeout(4000);
   await p.getByRole("button", { name: "Finish" }).click();
+  await p.getByRole("slider", { name: "Trim start" }).fill("500");
+  await p.getByRole("button", { name: "Remove a section" }).click();
+  await p.getByRole("slider", { name: "Remove from" }).fill("1500");
+  await p.getByRole("slider", { name: "Remove to" }).fill("2500");
   await p.getByRole("button", { name: "Save video" }).click();
   await p.waitForURL(/\/v\/[0-9A-Za-z]{12}$/, { timeout: 30_000 });
   const id = p.url().split("/v/")[1];
+  const kept = (await (await p.request.get(`/api/videos/${id}`)).json()).video.durationMs / 1000;
   await chrome.close();
 
   await page.goto(`/v/${id}`);
@@ -34,8 +39,9 @@ test("R15 WebKit (iPhone 13): a recorded MP4 plays, seeks and stops on a share p
   await expect.poll(() => page.getByTestId("video").evaluate((v: HTMLVideoElement) => v.currentTime), { timeout: 10_000 }).toBeGreaterThan(1);
   const st = await page.getByTestId("video").evaluate((v: HTMLVideoElement) => ({ err: v.error?.code ?? null, dur: v.duration, w: v.videoWidth }));
   expect(st.err).toBeNull();
-  expect(st.dur).toBeGreaterThan(3);
+  expect(Math.abs(st.dur - kept)).toBeLessThan(0.3);
+  expect(kept).toBeGreaterThan(1.4); expect(kept).toBeLessThan(3);
   expect(st.w).toBeGreaterThan(0);
-  await page.getByRole("slider", { name: "Seek" }).fill("3000");
-  await expect.poll(() => page.getByTestId("video").evaluate((v: HTMLVideoElement) => v.currentTime)).toBeGreaterThan(2.9);
+  await page.getByRole("slider", { name: "Seek" }).fill("1500");
+  await expect.poll(() => page.getByTestId("video").evaluate((v: HTMLVideoElement) => v.currentTime)).toBeGreaterThan(1.4);
 });

@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { signIn, record, play } from "./helpers";
+import { fileOf, probe } from "./media";
 
 const noOverflow = async (page: import("@playwright/test").Page) =>
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
@@ -38,4 +39,28 @@ test("R15 phones without screen capture offer camera recording only", async ({ p
   await expect(page.getByTestId("no-screen-note")).toHaveText("Phones and tablets can't share their screen from a browser, so this device records with its camera.");
   await expect(page.getByRole("button", { name: "Start recording" })).toBeEnabled();
   await noOverflow(page);
+});
+
+test("R3a R15 phones: a trimmed camera recording is cut before upload and saved as MP4", async ({ page }) => {
+  await page.addInitScript(() => { delete (MediaDevices.prototype as any).getDisplayMedia; });
+  await signIn(page, "owner@example.com");
+  await page.goto("/record");
+  const cd = page.getByRole("checkbox", { name: "Countdown" });
+  if (await cd.isChecked()) await cd.click({ force: true });
+  await page.getByRole("button", { name: "Start recording" }).tap();
+  await expect(page.getByTestId("rec-time")).toBeVisible({ timeout: 15_000 });
+  await page.waitForTimeout(4000);
+  await page.getByRole("button", { name: "Finish" }).tap();
+  await expect(page.getByRole("heading", { name: "Review your recording" })).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId("cut-note")).toBeVisible();
+  await page.getByRole("slider", { name: "Trim start" }).fill("1000");
+  await noOverflow(page);
+  await page.getByRole("button", { name: "Save video" }).tap();
+  await page.waitForURL(/\/v\/[0-9A-Za-z]{12}$/, { timeout: 60_000 });
+  const id = page.url().split("/v/")[1];
+  const v = (await (await page.request.get(`/api/videos/${id}`)).json()).video;
+  const info = probe(await fileOf(page, id));
+  expect(info.format).toContain("mp4");
+  expect(Math.abs(info.duration - v.durationMs / 1000)).toBeLessThan(0.3);
+  expect(v.durationMs).toBeGreaterThan(2500); expect(v.durationMs).toBeLessThan(3600);
 });
