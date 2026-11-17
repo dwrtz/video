@@ -59,7 +59,7 @@ export function validTrim(durationMs: number, start: number, end: number | null)
 /** How long the (trimmed) video takes at a speed, for the speed menu. */
 export const atSpeed = (lengthMs: number, speed: number) => Math.round(lengthMs / speed);
 
-/** What viewers see: the trim window, minus an optional removed middle section ("cut"). */
+/** An editing selection: the trim window, minus an optional removed middle section ("cut"). Saving cuts the file to it. */
 export type Edits = { durationMs: number; trimStartMs: number; trimEndMs: number | null; cutStartMs?: number | null; cutEndMs?: number | null };
 export function segments(v: Edits): [number, number][] {
   const { start, end } = trimWindow(v);
@@ -104,4 +104,52 @@ export function validCut(v: Edits): string | null {
   if (ce - cs < 500) return "Remove at least half a second";
   if (keptLength(v) < 1000) return "Keep at least one second";
   return null;
+}
+
+/** A span of media time in ms, [start, end). */
+export type Span = { start: number; end: number };
+
+/** The parts of [0, duration] a selection throws away: before the trim start, the removed section, after the trim end. */
+export function removedSpans(v: Edits): Span[] {
+  const kept = segments(v); const out: Span[] = []; let at = 0;
+  for (const [s, e] of kept) { if (s > at) out.push({ start: at, end: s }); at = e; }
+  if (at < v.durationMs) out.push({ start: at, end: v.durationMs });
+  return out;
+}
+/** True when the selection keeps everything (nothing to cut). */
+export const keepsAll = (v: Edits) => removedSpans(v).every(r => r.end - r.start < 1);
+
+/**
+ * Where a time in the old file lands in the cut file: shifted back by everything removed before it,
+ * or null when it falls inside a removed part (start inclusive, end exclusive).
+ */
+export function remapTime(ms: number, removed: Span[]): number | null {
+  let shift = 0;
+  for (const r of [...removed].sort((a, b) => a.start - b.start)) {
+    if (ms >= r.end) shift += r.end - r.start;
+    else if (ms >= r.start) return null;
+    else break;
+  }
+  return ms - shift;
+}
+/** Chapters after a cut: shifted like {@link remapTime}; ones inside removed parts or past the new end are dropped, and two landing on the same time keep the first. */
+export function remapChapters(chapters: Chapter[], removed: Span[], newDurationMs: number): Chapter[] {
+  const out: Chapter[] = [];
+  for (const c of chapters) {
+    const t = remapTime(c.timeMs, removed);
+    if (t === null || t >= newDurationMs || out.some(o => o.timeMs === t)) continue;
+    out.push({ timeMs: t, title: c.title });
+  }
+  return out.sort((a, b) => a.timeMs - b.timeMs);
+}
+/** Checks a list of removed spans sent to the server: sorted, inside [0, duration], not overlapping, each at least 1 ms. */
+export function validSpans(removed: unknown, durationMs: number): Span[] | null {
+  if (!Array.isArray(removed) || removed.length > 3) return null;
+  let at = 0; const out: Span[] = [];
+  for (const r of removed) {
+    const s = (r as any)?.start, e = (r as any)?.end;
+    if (!Number.isInteger(s) || !Number.isInteger(e) || s < at || e <= s || e > durationMs + 50) return null;
+    out.push({ start: s, end: Math.min(e, durationMs) }); at = e;
+  }
+  return out;
 }

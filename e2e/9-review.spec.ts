@@ -1,9 +1,11 @@
 import { test, expect } from "@playwright/test";
 import { signIn, record, recordToReview, viewer, play, mediaTime, origin, videoCount } from "./helpers";
+import { fileOf, jumps, probe, timecodes, timecodeScreen } from "./media";
 
 test.beforeEach(async ({ page }) => { await signIn(page); });
 
-test("R3a nothing is uploaded until Save; trim, a removed section, title and mute are applied and enforced", async ({ page, browser }) => {
+test("R3a nothing is uploaded until Save; Save cuts the file to the trim and removed section, drops muted sound, and uploads only that", async ({ page, browser }) => {
+  await timecodeScreen(page);
   const before = await videoCount(page);
   let created = 0;
   page.on("request", r => { if (r.method() === "POST" && new URL(r.url()).pathname === "/api/videos") created++; });
@@ -11,10 +13,12 @@ test("R3a nothing is uploaded until Save; trim, a removed section, title and mut
   expect(created).toBe(0);
   expect(await videoCount(page)).toBe(before);
   await expect(page.getByTestId("trim-video")).toBeVisible();
+  await expect(page.getByTestId("cut-note")).toContainText("uploads only the kept part");
   await page.getByRole("slider", { name: "Trim start" }).fill("1000");
   await page.getByRole("slider", { name: "Trim end" }).fill("5500");
   await expect(page.getByTestId("kept")).toHaveText("0:04 kept");
   await page.getByRole("button", { name: "Remove a section…" }).click();
+  await page.getByRole("slider", { name: "Remove to" }).fill("3000");
   await page.getByRole("slider", { name: "Remove from" }).fill("2000");
   await page.getByRole("slider", { name: "Remove to" }).fill("3000");
   await expect(page.getByText("Removing 0:02–0:03")).toBeVisible();
@@ -26,28 +30,75 @@ test("R3a nothing is uploaded until Save; trim, a removed section, title and mut
   await page.getByRole("textbox", { name: "Title" }).fill("Reviewed before saving");
   await page.getByRole("checkbox", { name: "Mute audio" }).check({ force: true });
   await page.getByRole("button", { name: "Save video" }).click();
-  await page.waitForURL(/\/v\/[0-9A-Za-z]{12}$/, { timeout: 30_000 });
+  await page.waitForURL(/\/v\/[0-9A-Za-z]{12}$/, { timeout: 60_000 });
+  expect(created).toBe(1);
   const id = page.url().split("/v/")[1];
   const v = (await (await page.request.get(`/api/videos/${id}`)).json()).video;
-  expect(v).toMatchObject({ title: "Reviewed before saving", trimStartMs: 1000, trimEndMs: 5500, cutStartMs: 2000, cutEndMs: 3000, muted: true });
+  expect(v.title).toBe("Reviewed before saving");
+  expect(v.contentType).toBe("video/mp4");
+  expect(Math.abs(v.durationMs - 3500)).toBeLessThanOrEqual(50);
+  expect(await page.evaluate(() => (window as any).__videoExport?.method)).toBe("webcodecs");
   await expect(page.getByTestId("time")).toHaveText("0:00 / 0:03");
-  await expect(page.getByTestId("no-sound")).toBeVisible();
-  // A viewer: the player skips the removed second and never plays sound; only the owner may download.
+  // The stored file is the cut: 3.5 s long, no sound, and the removed second is missing from the picture.
+  const file = await fileOf(page, id);
+  const info = probe(file);
+  expect(info.duration).toBeGreaterThan(3.3); expect(info.duration).toBeLessThan(3.75);
+  expect(info.hasAudio).toBe(false);
+  const codes = timecodes(file);
+  const big = jumps(codes);
+  expect(big).toHaveLength(1);
+  expect(big[0]).toBeGreaterThanOrEqual(8); expect(big[0]).toBeLessThanOrEqual(13); // ≈ the 1 s removed
+  expect(codes[codes.length - 1] - codes[0]).toBeGreaterThanOrEqual(41); // 3.5 s kept + 1 s removed, in tenths
+  expect(codes[codes.length - 1] - codes[0]).toBeLessThanOrEqual(49);
+  // Viewers get the same file, including as a download, and the player has nothing to enforce.
   const w = await viewer(browser);
   await w.page.goto(`/v/${id}`);
   await expect(w.page.getByTestId("time")).toHaveText("0:00 / 0:03");
-  expect(await w.page.getByTestId("video").evaluate((el: HTMLVideoElement) => el.muted)).toBe(true);
-  await w.page.getByRole("slider", { name: "Seek" }).fill("700");
-  await expect.poll(() => mediaTime(w.page)).toBeCloseTo(1.7, 1);
-  await play(w.page);
-  await expect.poll(() => mediaTime(w.page), { timeout: 6000 }).toBeGreaterThan(3.05);
-  await expect(w.page.getByTestId("time")).toHaveText(/^0:0[12] \/ 0:03$/);
-  expect((await w.page.request.get(`/api/videos/${id}/media?download`)).status()).toBe(403);
-  expect((await page.request.get(`/api/videos/${id}/media?download`, { headers: { range: "bytes=0-9" } })).status()).toBe(206);
+  const dl = await w.page.request.get(`/api/videos/${id}/media?download`);
+  expect(dl.status()).toBe(200);
+  expect(Buffer.from(await dl.body()).equals(file)).toBe(true);
   await w.ctx.close();
-  // Removed sections are checked on the server too.
-  expect((await page.request.patch(`/api/videos/${id}`, { data: { cutStartMs: 500, cutEndMs: 900 }, headers: origin(page) })).status()).toBe(400);
-  expect((await page.request.patch(`/api/videos/${id}`, { data: { cutStartMs: null, cutEndMs: null, muted: false }, headers: origin(page) })).status()).toBe(200);
+});
+
+test("R3a Save without edits uploads the recording as it is", async ({ page }) => {
+  await timecodeScreen(page);
+  await page.evaluate(() => delete (window as any).__videoExport);
+  const id = await record(page, { mode: "Screen only", ms: 3000 });
+  expect(await page.evaluate(() => (window as any).__videoExport ?? null)).toBeNull();
+  const info = probe(await fileOf(page, id));
+  expect(info.hasAudio).toBe(true);
+  expect(jumps(timecodes(await fileOf(page, id)))).toHaveLength(0);
+});
+
+test("R3a cutting can be cancelled, and the real-time fallback cuts too", async ({ page }) => {
+  await timecodeScreen(page);
+  await recordToReview(page, { mode: "Screen only", ms: 6000 });
+  await page.evaluate(() => { (window as any).__exportMethod = "realtime"; });
+  await page.getByRole("slider", { name: "Trim start" }).fill("1000");
+  const before = await videoCount(page);
+  await page.getByRole("button", { name: "Save video" }).click();
+  await expect(page.getByTestId("save-progress")).toContainText("Cutting your video…");
+  await page.getByTestId("save-progress").getByRole("button", { name: "Cancel" }).click();
+  await expect(page.getByRole("button", { name: "Save video" })).toBeVisible();
+  expect(await videoCount(page)).toBe(before);
+  // Now let it run: MediaRecorder plays the kept part in real time.
+  await page.getByRole("button", { name: "Remove a section…" }).click();
+  await page.getByRole("slider", { name: "Remove to" }).fill("4000");
+  await page.getByRole("slider", { name: "Remove from" }).fill("2500");
+  await page.getByRole("slider", { name: "Remove to" }).fill("4000");
+  await page.getByRole("button", { name: "Save video" }).click();
+  await page.waitForURL(/\/v\/[0-9A-Za-z]{12}$/, { timeout: 60_000 });
+  expect(await page.evaluate(() => (window as any).__videoExport?.method)).toBe("realtime");
+  const id = page.url().split("/v/")[1];
+  const file = await fileOf(page, id);
+  const info = probe(file);
+  const kept = (await (await page.request.get(`/api/videos/${id}`)).json()).video.durationMs / 1000;
+
+  expect(Math.abs(info.duration - kept)).toBeLessThan(0.4);
+  expect(info.hasAudio).toBe(true);
+  const big = jumps(timecodes(file));
+  expect(big).toHaveLength(1);
+  expect(big[0]).toBeGreaterThanOrEqual(12); expect(big[0]).toBeLessThanOrEqual(19); // ≈ the 1.5 s removed
 });
 
 test("R3a discard and record again throws the recording away without uploading", async ({ page }) => {

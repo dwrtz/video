@@ -3,7 +3,7 @@ import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { TopBar, Avatar, useAuth } from "../App";
 import { api, ApiError, copyText, relativeDate, shareUrl } from "../lib/api";
 import { LIMITS, REACTIONS } from "../../shared/limits";
-import { chapterAt, formatTime, toKept, toMedia } from "../../shared/time";
+import { chapterAt, formatTime } from "../../shared/time";
 import type { Comment, Reaction, VideoDetail } from "../../shared/types";
 import { Player, type PlayerHandle } from "../components/Player";
 import { EditDialog } from "../components/EditDialog";
@@ -36,9 +36,9 @@ export function WatchPage() {
   if (missing) return <div className="page"><TopBar /><main className="empty-page"><h1>Video not found</h1><p className="muted">The link may be wrong, or the video was deleted.</p><Link className="btn btn-primary" to="/">Go home</Link></main></div>;
   if (!video) return <div className="page"><TopBar /><main className="watch"><div className="watch-main"><div className="player skeleton" /></div></main></div>;
 
-  // ?t=90 starts at 1:30 (relative to the trim start).
+  // ?t=90 starts at 1:30.
   const tParam = new URLSearchParams(loc.search).get("t");
-  const startAtMs = tParam && /^\d+$/.test(tParam) ? toMedia(video, Number(tParam) * 1000) : undefined;
+  const startAtMs = tParam && /^\d+$/.test(tParam) ? Number(tParam) * 1000 : undefined;
   const react = async (emoji: string) => {
     const timeMs = Math.min(Math.max(player.current?.time() ?? 0, 0), video.durationMs);
     player.current?.burst(emoji);
@@ -64,9 +64,9 @@ export function WatchPage() {
             </div>
             <div className="watch-actions">
               <button className="btn btn-primary" onClick={async () => toast.show((await copyText(shareUrl(id))) ? "Link copied" : shareUrl(id))}><IconLink size={17} /> Copy link</button>
-              {((video.allowDownload && !video.muted) || video.isOwner) && <a className="icon-btn bordered" href={`/api/videos/${id}/media?download`} aria-label="Download" title="Download"><IconDownload size={18} /></a>}
+              {(video.allowDownload || video.isOwner) && <a className="icon-btn bordered" href={`/api/videos/${id}/media?download`} aria-label="Download" title="Download"><IconDownload size={18} /></a>}
               {video.isOwner && <>
-                <button className="icon-btn bordered" onClick={() => setEditing(true)} aria-label="Edit video" title="Edit (trim, chapters, sharing)"><IconEdit size={18} /></button>
+                <button className="icon-btn bordered" onClick={() => setEditing(true)} aria-label="Edit video" title="Edit (cut, chapters, sharing)"><IconEdit size={18} /></button>
                 <button className="icon-btn bordered" onClick={() => setDeleting(true)} aria-label="Delete video" title="Delete"><IconTrash size={18} /></button>
               </>}
             </div>
@@ -102,7 +102,7 @@ function Chapters({ video, player, onEdit }: { video: VideoDetail; player: React
   if (!video.chapters.length) return <div className="side-empty"><IconChapters size={28} /><p>No chapters yet.</p>{video.isOwner && <button className="btn btn-ghost" onClick={onEdit}>Add chapters</button>}</div>;
   return (
     <ol className="chapters">
-      {video.chapters.map((c, i) => <li key={i} className={i === cur ? "current" : ""}><button onClick={() => { player.current?.seek(c.timeMs); player.current?.play(); }}><span className="ts">{formatTime(toKept(video, c.timeMs))}</span><span>{c.title}</span></button></li>)}
+      {video.chapters.map((c, i) => <li key={i} className={i === cur ? "current" : ""}><button onClick={() => { player.current?.seek(c.timeMs); player.current?.play(); }}><span className="ts">{formatTime(c.timeMs)}</span><span>{c.title}</span></button></li>)}
     </ol>
   );
 }
@@ -132,7 +132,7 @@ function Comments({ video, comments, setComments, player, composer, me, toast }:
             <Avatar name={c.authorName} size={30} />
             <div className="comment-body">
               <div className="comment-head"><strong>{c.authorName}</strong>{c.byOwner && <span className="badge">Author</span>}<span className="muted small">{relativeDate(c.createdAt)}</span></div>
-              <p>{c.timeMs !== null && <button className="ts" onClick={() => { player.current?.seek(c.timeMs!); }} aria-label={`Jump to ${formatTime(toKept(video, c.timeMs))}`}>{formatTime(toKept(video, c.timeMs))}</button>}{c.body}</p>
+              <p>{c.timeMs !== null && <button className="ts" onClick={() => { player.current?.seek(c.timeMs!); }} aria-label={`Jump to ${formatTime(c.timeMs)}`}>{formatTime(c.timeMs)}</button>}{c.body}</p>
             </div>
             {(c.mine || video.isOwner) && <button className="icon-btn small" aria-label="Delete comment" onClick={async () => { await api(`/api/videos/${video.id}/comments/${c.id}`, { method: "DELETE" }); setComments(comments.filter(x => x.id !== c.id)); toast("Comment deleted"); }}><IconTrash size={15} /></button>}
           </li>
@@ -144,7 +144,7 @@ function Comments({ video, comments, setComments, player, composer, me, toast }:
           <textarea ref={composer} placeholder="Add a comment…" aria-label="Comment" value={text} maxLength={LIMITS.commentChars} rows={2} onChange={e => setText(e.target.value)}
             onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) post(e); }} />
           <div className="composer-row">
-            <label className="check"><input type="checkbox" checked={atTime} onChange={e => setAtTime(e.target.checked)} /><IconClock size={15} /> at {formatTime(toKept(video, now))}</label>
+            <label className="check"><input type="checkbox" checked={atTime} onChange={e => setAtTime(e.target.checked)} /><IconClock size={15} /> at {formatTime(now)}</label>
             <button className="btn btn-primary btn-sm" disabled={!text.trim() || (!me && !name.trim())}>Post</button>
           </div>
           {err && <div className="alert small" role="alert">{err}</div>}

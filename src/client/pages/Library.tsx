@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { TopBar } from "../App";
 import { api, copyText, relativeDate, shareUrl } from "../lib/api";
-import { formatTime, keptLength } from "../../shared/time";
+import { formatTime } from "../../shared/time";
 import type { VideoSummary } from "../../shared/types";
 import { IconComment, IconEye, IconLink, IconMore, IconPlus, IconSearch, IconTrash, IconEdit, IconScreenCam, IconCamera, IconScreen } from "../components/Icons";
 import { Confirm, Toast, useToast } from "../components/ui";
@@ -17,7 +17,7 @@ export function LibraryPage() {
   const load = () => api<{ videos: VideoSummary[] }>("/api/videos").then(r => setVideos(r.videos));
   useEffect(() => { load(); }, []);
   const shown = useMemo(() => (videos ?? []).filter(v => v.title.toLowerCase().includes(q.trim().toLowerCase())), [videos, q]);
-  const totalMs = (videos ?? []).reduce((a, v) => a + keptLength(v), 0);
+  const totalMs = (videos ?? []).reduce((a, v) => a + v.durationMs, 0);
   return (
     <div className="page">
       <TopBar />
@@ -65,7 +65,7 @@ function VideoCard({ v, renaming, onOpen, onCopy, onRename, onRenamed, onDelete 
     <li className="card" data-testid="video-card">
       <button className="thumb" onClick={onOpen} aria-label={`Open ${v.title}`}>
         {v.hasThumbnail ? <img src={`/api/videos/${v.id}/thumbnail`} alt="" loading="lazy" /> : <span className="thumb-blank"><ModeIcon size={28} /></span>}
-        <span className="duration">{formatTime(keptLength(v))}</span>
+        <span className="duration">{formatTime(v.durationMs)}</span>
       </button>
       <div className="card-body">
         {renaming ? (

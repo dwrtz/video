@@ -4,13 +4,15 @@ import { parseAllowlist, emailAllowed, NOT_ALLOWED } from "../shared/allowlist";
 import { LIMITS, MODES, REACTIONS, type Mode } from "../shared/limits";
 import { randomId, isVideoId, isViewerId } from "../shared/ids";
 import { parseRange } from "../shared/range";
-import { validCut, validTrim, type Chapter } from "../shared/time";
+import { remapChapters, remapTime, validSpans, type Chapter } from "../shared/time";
 import { applyPatches, webmHeaderPatches } from "../shared/webm";
 import type { Me, VideoDetail, VideoSummary, Comment } from "../shared/types";
 
 const now = () => Date.now();
 const videoKey = (id: string) => `videos/${id}/video`;
 const thumbKey = (id: string) => `videos/${id}/thumb.jpg`;
+/** The current file: a video's first upload lives at videos/{id}/video; each cut replaces it with videos/{id}/v-{random}. */
+const mediaKey = (v: Row) => (v.media_key as string | null) ?? videoKey(v.id);
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CONTENT_TYPES = ["video/webm", "video/mp4"];
 
@@ -46,8 +48,7 @@ async function startSession(req: Request, env: Env, user: Me) {
 // ---------- videos ----------
 type Row = Record<string, any>;
 const summary = (r: Row): VideoSummary => ({
-  id: r.id, title: r.title, status: r.status, mode: r.mode, durationMs: r.duration_ms, trimStartMs: r.trim_start_ms, trimEndMs: r.trim_end_ms,
-  cutStartMs: r.cut_start_ms ?? null, cutEndMs: r.cut_end_ms ?? null, muted: !!r.muted,
+  id: r.id, title: r.title, status: r.status, mode: r.mode, durationMs: r.duration_ms,
   createdAt: r.created_at, viewCount: r.view_count, commentCount: r.comment_count ?? 0, hasThumbnail: !!r.has_thumbnail, size: r.size,
 });
 async function getVideo(env: Env, id: string): Promise<Row> {
@@ -78,7 +79,7 @@ const viewerOf = (req: Request) => { const v = req.headers.get("x-viewer"); retu
 // FixedLengthStream: Workers then still send Content-Length, which Safari wants on 206 answers.
 async function repairWebm(env: Env, v: Row, size: number, start: number, length: number, body: ReadableStream): Promise<ReadableStream> {
   if (!String(v.content_type).startsWith("video/webm") || start >= 4096) return body;
-  const head = await env.MEDIA.get(videoKey(v.id), { range: { offset: 0, length: Math.min(4096, size) } });
+  const head = await env.MEDIA.get(mediaKey(v), { range: { offset: 0, length: Math.min(4096, size) } });
   if (!head) return body;
   const patches = webmHeaderPatches(new Uint8Array(await head.arrayBuffer()), size);
   if (!patches.length) return body;
@@ -90,31 +91,11 @@ async function repairWebm(env: Env, v: Row, size: number, start: number, length:
 
 async function deleteVideoData(env: Env, v: Row) {
   if (v.status === "uploading" && v.upload_id) await env.MEDIA.resumeMultipartUpload(videoKey(v.id), v.upload_id).abort().catch(() => {});
-  await env.MEDIA.delete([videoKey(v.id), thumbKey(v.id)]);
+  if (v.pending_key && v.pending_upload_id) await env.MEDIA.resumeMultipartUpload(v.pending_key, v.pending_upload_id).abort().catch(() => {});
+  await env.MEDIA.delete([...new Set([videoKey(v.id), mediaKey(v), thumbKey(v.id)])]);
   await env.DB.batch(["comments", "reactions", "views"].map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE video_id = ?`).bind(v.id))
     .concat(env.DB.prepare("DELETE FROM videos WHERE id = ?").bind(v.id)));
 }
-
-/** Applies title / trim / removed-section / mute changes from a request body to a video row; throws 400 on bad input. */
-function applyEdits(v: Row, b: Record<string, any>) {
-  const next = { title: v.title, trim_start_ms: v.trim_start_ms, trim_end_ms: v.trim_end_ms, cut_start_ms: v.cut_start_ms ?? null, cut_end_ms: v.cut_end_ms ?? null, muted: v.muted ? 1 : 0 };
-  if ("title" in b) next.title = title(b.title);
-  if ("trimStartMs" in b || "trimEndMs" in b) {
-    const s = "trimStartMs" in b ? b.trimStartMs : v.trim_start_ms;
-    let e = "trimEndMs" in b ? b.trimEndMs : v.trim_end_ms;
-    if (e === v.duration_ms) e = null;
-    const err = validTrim(v.duration_ms, s, e);
-    if (err) throw new HttpError(400, err);
-    next.trim_start_ms = s; next.trim_end_ms = e;
-  }
-  if ("cutStartMs" in b || "cutEndMs" in b) { next.cut_start_ms = b.cutStartMs ?? null; next.cut_end_ms = b.cutEndMs ?? null; }
-  const err = validCut({ durationMs: v.duration_ms, trimStartMs: next.trim_start_ms, trimEndMs: next.trim_end_ms, cutStartMs: next.cut_start_ms, cutEndMs: next.cut_end_ms });
-  if (err) throw new HttpError(400, err);
-  if ("muted" in b) next.muted = b.muted ? 1 : 0;
-  return next;
-}
-const EDIT_SQL = "UPDATE videos SET title = ?, trim_start_ms = ?, trim_end_ms = ?, cut_start_ms = ?, cut_end_ms = ?, muted = ? WHERE id = ?";
-const editArgs = (n: ReturnType<typeof applyEdits>, id: string) => [n.title, n.trim_start_ms, n.trim_end_ms, n.cut_start_ms, n.cut_end_ms, n.muted, id];
 
 function title(raw: unknown, fallback?: string) {
   const t = typeof raw === "string" ? raw.trim().replace(/\s+/g, " ") : "";
@@ -222,16 +203,8 @@ const router = new Router()
     if (!Number.isInteger(durationMs) || durationMs < 500 || durationMs > LIMITS.maxRecordingMs + 5000) throw new HttpError(400, "Bad duration");
     const obj = await env.MEDIA.resumeMultipartUpload(videoKey(v.id), v.upload_id).complete(parts.map((x: any) => ({ partNumber: x.partNumber, etag: x.etag })));
     if (obj.size > LIMITS.maxVideoBytes) { await deleteVideoData(env, { ...v, status: "ready" }); throw new HttpError(413, "Video too large"); }
-    // Edits made in the review step before saving come with the completion; check them before finishing.
-    const edits = b.edits && typeof b.edits === "object" ? b.edits : null;
-    let next: ReturnType<typeof applyEdits> | null = null;
-    try { if (edits) next = applyEdits({ ...v, duration_ms: durationMs }, edits); }
-    catch (e) { if (e instanceof HttpError) next = null; else throw e; } // bad edits never lose the recording
-    await env.DB.batch([
-      env.DB.prepare("UPDATE videos SET status = 'ready', upload_id = NULL, size = ?, duration_ms = ? WHERE id = ?").bind(obj.size, durationMs, v.id),
-      ...(next ? [env.DB.prepare(EDIT_SQL).bind(...editArgs(next, v.id))] : []),
-    ]);
-    return json({ video: summary({ ...v, ...(next ?? {}), status: "ready", size: obj.size, duration_ms: durationMs }), editsApplied: !!next || !edits });
+    await env.DB.prepare("UPDATE videos SET status = 'ready', upload_id = NULL, size = ?, duration_ms = ? WHERE id = ?").bind(obj.size, durationMs, v.id).run();
+    return json({ video: summary({ ...v, status: "ready", size: obj.size, duration_ms: durationMs }) });
   })
   .on("DELETE", "/api/videos/:id/upload", async (req, env, p) => {
     const { v } = await ownVideo(req, env, p.id);
@@ -246,6 +219,75 @@ const router = new Router()
     if (!buf.byteLength || buf.byteLength > LIMITS.maxThumbnailBytes) throw new HttpError(413, "Thumbnail too large");
     await env.MEDIA.put(thumbKey(v.id), buf, { httpMetadata: { contentType: "image/jpeg" } });
     await env.DB.prepare("UPDATE videos SET has_thumbnail = 1 WHERE id = ?").bind(v.id).run();
+    return json({ ok: true });
+  })
+
+  // Cutting a saved video: the browser uploads the cut copy as a new object, then the server swaps to it.
+  .on("POST", "/api/videos/:id/replace", async (req, env, p) => {
+    const { user, v } = await ownVideo(req, env, p.id);
+    if (v.status !== "ready") throw new HttpError(409, "Finish the upload first");
+    const b = await body(req);
+    const contentType = String(b.contentType ?? "");
+    if (!CONTENT_TYPES.includes(contentType.split(";")[0])) throw new HttpError(400, "Only WebM or MP4 video");
+    const w = Number(b.width), h = Number(b.height);
+    if (!Number.isInteger(w) || !Number.isInteger(h) || w < 1 || h < 1 || w > 7680 || h > 4320) throw new HttpError(400, "Bad video size");
+    await limit(env.CREATE_LIMIT, "create:" + user.id);
+    if (v.pending_key && v.pending_upload_id) await env.MEDIA.resumeMultipartUpload(v.pending_key, v.pending_upload_id).abort().catch(() => {});
+    const key = `videos/${v.id}/v-${randomId(10)}`;
+    const upload = await env.MEDIA.createMultipartUpload(key, { httpMetadata: { contentType } });
+    await env.DB.prepare("UPDATE videos SET pending_key = ?, pending_upload_id = ?, pending_meta = ? WHERE id = ?").bind(key, upload.uploadId, JSON.stringify({ contentType, w, h }), v.id).run();
+    return json({ ok: true }, 201);
+  })
+  .on("PUT", "/api/videos/:id/replace/parts/:n", async (req, env, p) => {
+    const { v } = await ownVideo(req, env, p.id);
+    if (!v.pending_key || !v.pending_upload_id) throw new HttpError(409, "Start the replacement first");
+    const n = Number(p.n);
+    if (!Number.isInteger(n) || n < 1 || n > 10000) throw new HttpError(400, "Bad part number");
+    const len = Number(req.headers.get("content-length"));
+    if (!req.body || !len) throw new HttpError(400, "Empty part");
+    if (len > LIMITS.maxPartBytes) throw new HttpError(413, "Part too large");
+    if (n * LIMITS.partBytes > LIMITS.maxVideoBytes + LIMITS.partBytes) throw new HttpError(413, "Video too large");
+    const part = await env.MEDIA.resumeMultipartUpload(v.pending_key, v.pending_upload_id).uploadPart(n, req.body);
+    return json({ partNumber: part.partNumber, etag: part.etag });
+  })
+  .on("POST", "/api/videos/:id/replace/complete", async (req, env, p) => {
+    const { v } = await ownVideo(req, env, p.id);
+    if (!v.pending_key || !v.pending_upload_id) throw new HttpError(409, "Start the replacement first");
+    const b = await body(req);
+    const parts = Array.isArray(b.parts) ? b.parts : [];
+    if (!parts.length || parts.some((x: any) => !Number.isInteger(x?.partNumber) || typeof x?.etag !== "string")) throw new HttpError(400, "List the uploaded parts");
+    const durationMs = Number(b.durationMs);
+    if (!Number.isInteger(durationMs) || durationMs < 500 || durationMs > v.duration_ms + 1000) throw new HttpError(400, "Bad duration");
+    const removed = validSpans(b.removed, v.duration_ms);
+    if (!removed) throw new HttpError(400, "Bad list of removed parts");
+    const removedMs = removed.reduce((n, r) => n + r.end - r.start, 0);
+    if (Math.abs(v.duration_ms - removedMs - durationMs) > 1500) throw new HttpError(400, "The cut video's length doesn't match the removed parts");
+    const meta = JSON.parse(v.pending_meta ?? "{}");
+    const obj = await env.MEDIA.resumeMultipartUpload(v.pending_key, v.pending_upload_id).complete(parts.map((x: any) => ({ partNumber: x.partNumber, etag: x.etag })));
+    if (obj.size > LIMITS.maxVideoBytes) {
+      await env.MEDIA.delete(v.pending_key);
+      await env.DB.prepare("UPDATE videos SET pending_key = NULL, pending_upload_id = NULL, pending_meta = NULL WHERE id = ?").bind(v.id).run();
+      throw new HttpError(413, "Video too large");
+    }
+    // Comments keep their text; inside a removed part they lose their time. Reactions there are deleted.
+    const comments = (await env.DB.prepare("SELECT id, time_ms FROM comments WHERE video_id = ? AND time_ms IS NOT NULL").bind(v.id).all<Row>()).results;
+    const reactions = (await env.DB.prepare("SELECT id, time_ms FROM reactions WHERE video_id = ?").bind(v.id).all<Row>()).results;
+    const fit = (t: number | null) => (t === null || t >= durationMs ? null : t);
+    const stmts = [
+      env.DB.prepare("UPDATE videos SET media_key = ?, content_type = ?, size = ?, duration_ms = ?, width = ?, height = ?, chapters = ?, pending_key = NULL, pending_upload_id = NULL, pending_meta = NULL WHERE id = ?")
+        .bind(v.pending_key, meta.contentType ?? v.content_type, obj.size, durationMs, meta.w ?? v.width, meta.h ?? v.height, JSON.stringify(remapChapters(JSON.parse(v.chapters), removed, durationMs)), v.id),
+      ...comments.map(c => env.DB.prepare("UPDATE comments SET time_ms = ? WHERE id = ?").bind(fit(remapTime(c.time_ms, removed)), c.id)),
+      ...reactions.map(r => { const t = fit(remapTime(r.time_ms, removed)); return t === null ? env.DB.prepare("DELETE FROM reactions WHERE id = ?").bind(r.id) : env.DB.prepare("UPDATE reactions SET time_ms = ? WHERE id = ?").bind(t, r.id); }),
+    ];
+    await env.DB.batch(stmts);
+    const old = mediaKey(v);
+    if (old !== v.pending_key) await env.MEDIA.delete(old); // the uncut file is gone for good
+    return json({ video: summary({ ...v, size: obj.size, duration_ms: durationMs }) });
+  })
+  .on("DELETE", "/api/videos/:id/replace", async (req, env, p) => {
+    const { v } = await ownVideo(req, env, p.id);
+    if (v.pending_key && v.pending_upload_id) await env.MEDIA.resumeMultipartUpload(v.pending_key, v.pending_upload_id).abort().catch(() => {});
+    await env.DB.prepare("UPDATE videos SET pending_key = NULL, pending_upload_id = NULL, pending_meta = NULL WHERE id = ?").bind(v.id).run();
     return json({ ok: true });
   })
 
@@ -266,15 +308,12 @@ const router = new Router()
     const { v } = await ownVideo(req, env, p.id);
     if (v.status !== "ready") throw new HttpError(409, "Finish the upload first");
     const b = await body(req);
-    const ed = applyEdits(v, b);
-    const next = { chapters: v.chapters, allow_comments: v.allow_comments, allow_download: v.allow_download };
+    const next = { title: v.title, chapters: v.chapters, allow_comments: v.allow_comments, allow_download: v.allow_download };
+    if ("title" in b) next.title = title(b.title);
     if ("chapters" in b) next.chapters = JSON.stringify(cleanChapters(b.chapters, v.duration_ms));
     if ("allowComments" in b) next.allow_comments = b.allowComments ? 1 : 0;
     if ("allowDownload" in b) next.allow_download = b.allowDownload ? 1 : 0;
-    await env.DB.batch([
-      env.DB.prepare(EDIT_SQL).bind(...editArgs(ed, v.id)),
-      env.DB.prepare("UPDATE videos SET chapters = ?, allow_comments = ?, allow_download = ? WHERE id = ?").bind(next.chapters, next.allow_comments, next.allow_download, v.id),
-    ]);
+    await env.DB.prepare("UPDATE videos SET title = ?, chapters = ?, allow_comments = ?, allow_download = ? WHERE id = ?").bind(next.title, next.chapters, next.allow_comments, next.allow_download, v.id).run();
     return json({ ok: true });
   })
   .on("DELETE", "/api/videos/:id", async (req, env, p) => {
@@ -285,16 +324,16 @@ const router = new Router()
   .on("GET", "/api/videos/:id/media", async (req, env, p) => {
     const v = await readyVideo(env, p.id);
     const download = new URL(req.url).searchParams.has("download");
-    if (download && (!v.allow_download || v.muted) && (await currentUser(req, env))?.id !== v.owner_id)
-      throw new HttpError(403, v.muted ? "This video is muted, so only its owner can download it" : "Downloads are turned off for this video");
-    const head = await env.MEDIA.head(videoKey(v.id));
+    if (download && !v.allow_download && (await currentUser(req, env))?.id !== v.owner_id)
+      throw new HttpError(403, "Downloads are turned off for this video");
+    const head = await env.MEDIA.head(mediaKey(v));
     if (!head) throw new HttpError(404, "Video not found");
     const range = parseRange(req.headers.get("range"), head.size);
     if (range === "invalid") return new Response(null, { status: 416, headers: { "content-range": `bytes */${head.size}` } });
     const headers = new Headers({ "content-type": v.content_type.split(";")[0], "accept-ranges": "bytes", "cache-control": "private, max-age=3600", "x-content-type-options": "nosniff" });
     if (download) headers.set("content-disposition", `attachment; filename="${v.title.replace(/[^\w .-]+/g, "").trim() || "video"}.${v.content_type.includes("mp4") ? "mp4" : "webm"}"`);
     if (req.method === "HEAD") { headers.set("content-length", String(head.size)); return new Response(null, { headers }); }
-    const obj = await env.MEDIA.get(videoKey(v.id), range ? { range } : {});
+    const obj = await env.MEDIA.get(mediaKey(v), range ? { range } : {});
     if (!obj) throw new HttpError(404, "Video not found");
     const start = range ? range.offset : 0;
     const body = await repairWebm(env, v, head.size, start, range ? range.length : head.size, obj.body);

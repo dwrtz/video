@@ -3,9 +3,10 @@ import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import { TopBar } from "../App";
 import { LIMITS, type Mode } from "../../shared/limits";
-import { formatTime, validCut, validTrim } from "../../shared/time";
+import { formatTime, keepsAll, validCut, validTrim } from "../../shared/time";
 import { BUBBLE_DIAMETER, DEFAULT_BUBBLE, RecordingSession, canRecordScreen, clampBubble, type Bubble, type BubbleSize } from "../lib/recorder";
 import { uploadRecording } from "../lib/upload";
+import { exportCut, isAbort, thumbnailOf } from "../lib/exporter";
 import type { Recording } from "../lib/recorder";
 import { TrimEditor, toEdits, type TrimValue } from "../components/TrimEditor";
 import { Confirm } from "../components/ui";
@@ -140,21 +141,40 @@ export function RecorderPage() {
       setError(`Couldn't finish the recording: ${e?.message ?? e}`); setPhase("setup");
     } finally { finishing.current = false; }
   }
+  const exportCtl = useRef<AbortController | null>(null);
+  const [step, setStep] = useState<"cutting" | "uploading">("uploading");
+  /** Save: cut the recording in this browser if anything was trimmed, removed or muted, then upload only the result. */
   const save = async () => {
     const r = review!; setError(null);
     const D = r.rec.durationMs;
-    const bad = validTrim(D, r.trim.start, r.trim.end) ?? validCut(toEdits(D, r.trim));
+    const edits = toEdits(D, r.trim);
+    const bad = validTrim(D, r.trim.start, r.trim.end) ?? validCut(edits);
     if (bad) { setError(bad); return; }
+    const title = r.title.trim() || defaultTitle();
+    let rec = r.rec; let now: "cutting" | "uploading" = "uploading";
     setPhase("uploading"); setProgress(0);
     try {
-      const edits = { title: r.title.trim() || defaultTitle(), trimStartMs: r.trim.start, trimEndMs: r.trim.end === D ? null : r.trim.end, cutStartMs: r.trim.cut?.[0] ?? null, cutEndMs: r.trim.cut?.[1] ?? null, muted: r.muted };
-      const id = await uploadRecording({ ...r.rec, title: edits.title, edits }, setProgress);
+      if (!keepsAll(edits) || r.muted) {
+        now = "cutting"; setStep("cutting");
+        const ac = new AbortController(); exportCtl.current = ac;
+        const t0 = performance.now();
+        const out = await exportCut(r.rec.blob, { edits, muted: r.muted, onProgress: setProgress, signal: ac.signal });
+        exportCtl.current = null;
+        (window as any).__videoExport = { method: out.method, ms: Math.round(performance.now() - t0), keptMs: out.durationMs, bytes: out.blob.size };
+        rec = { ...rec, blob: out.blob, mimeType: out.mimeType, durationMs: out.durationMs, width: out.width, height: out.height, thumbnail: (await thumbnailOf(out.blob)) ?? rec.thumbnail };
+        setProgress(0);
+      }
+      now = "uploading"; setStep("uploading");
+      const id = await uploadRecording({ ...rec, title }, setProgress);
       setReview(null);
       nav(`/v/${id}`, { state: { justRecorded: true } });
     } catch (e: any) {
-      setError(`Upload failed: ${e?.message ?? e}. Your recording is still here; try Save again.`); setPhase("review");
+      exportCtl.current = null;
+      if (isAbort(e)) { setPhase("review"); return; }
+      setError(`${now === "cutting" ? "Couldn't cut the video" : "Upload failed"}: ${e?.message ?? e}. Your recording is still here; try Save again.`); setPhase("review");
     }
   };
+  const cancelCut = () => exportCtl.current?.abort();
   const discardReview = () => { setReview(null); setConfirmDiscard(false); setPhase("setup"); setElapsed(0); };
   const cancel = () => { session.current?.discard(); session.current = null; closePip(); setPhase("setup"); setElapsed(0); };
   const togglePause = () => { const s = session.current!; if (s.state === "recording") { s.pause(); setPaused(true); } else { s.resume(); setPaused(false); } setElapsed(s.elapsed()); };
@@ -167,7 +187,7 @@ export function RecorderPage() {
       <TopBar />
       <main className="recorder">
         {(phase === "review" || (phase === "uploading" && review)) && review ? (
-          <ReviewStep review={review} setReview={setReview} surface={surface} busy={phase === "uploading"} progress={progress} error={error}
+          <ReviewStep review={review} setReview={setReview} surface={surface} busy={phase === "uploading"} step={step} onCancelCut={cancelCut} progress={progress} error={error}
             onSave={save} onRedo={() => setConfirmDiscard(true)} />
         ) : <>
         <Stage mode={mode} camera={camera} bubble={bubble} setBubble={setBubble} session={live ? session.current : null}>
@@ -241,7 +261,7 @@ function copyStyles(w: Window) {
 }
 
 /** After Stop: preview, trim, remove a section, title, mute; then Save (upload) or discard. */
-function ReviewStep({ review, setReview, surface, busy, progress, error, onSave, onRedo }: { review: Review; setReview: (r: Review) => void; surface: string; busy: boolean; progress: number; error: string | null; onSave: () => void; onRedo: () => void }) {
+function ReviewStep({ review, setReview, surface, busy, step, onCancelCut, progress, error, onSave, onRedo }: { review: Review; setReview: (r: Review) => void; surface: string; busy: boolean; step: "cutting" | "uploading"; onCancelCut: () => void; progress: number; error: string | null; onSave: () => void; onRedo: () => void }) {
   const r = review;
   return (
     <section className="review" aria-label="Review your recording">
@@ -253,10 +273,14 @@ function ReviewStep({ review, setReview, surface, busy, progress, error, onSave,
         <div className="review-side">
           <label className="field"><span>Title</span><input value={r.title} onChange={e => setReview({ ...r, title: e.target.value })} maxLength={LIMITS.titleChars} aria-label="Title" disabled={busy} /></label>
           <label className="switch"><input type="checkbox" checked={r.muted} onChange={e => setReview({ ...r, muted: e.target.checked })} disabled={busy} /><span /> Mute audio</label>
-          <small className="muted">Trim, removed section and mute apply when people watch the link. The stored file is the full recording, and you can change these later. Downloads of muted videos are only for you.</small>
+          <small className="muted" data-testid="cut-note">Saving cuts the video in this browser and uploads only the kept part. The cut parts (and the sound, if muted) never leave this device. Cutting can take up to as long as the kept part.</small>
           {error && <div className="alert" role="alert">{error}</div>}
           {busy ? (
-            <div className="upload-card inline" role="status"><div className="spinner" /><div><strong>{progress < 1 ? "Uploading your video…" : "Opening your video…"}</strong><div className="progress"><span style={{ width: `${Math.round(progress * 100)}%` }} /></div><small className="muted">{Math.round(progress * 100)}%</small></div></div>
+            <div className="upload-card inline" role="status" data-testid="save-progress">
+              <div className="spinner" />
+              <div><strong>{step === "cutting" ? "Cutting your video…" : progress < 1 ? "Uploading your video…" : "Opening your video…"}</strong><div className="progress"><span style={{ width: `${Math.round(progress * 100)}%` }} /></div><small className="muted">{Math.round(progress * 100)}%</small></div>
+              {step === "cutting" && <button className="btn btn-ghost btn-sm" onClick={onCancelCut}>Cancel</button>}
+            </div>
           ) : (
             <div className="review-actions">
               <button className="btn btn-primary btn-lg" onClick={onSave}>Save video</button>
